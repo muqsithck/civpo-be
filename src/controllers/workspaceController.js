@@ -11,6 +11,11 @@ import {
   findMemberSubdoc,
   getUserDocByUserId,
 } from '../lib/workspaceMembership.js'
+import { clientInviteRoleToEnum } from '../lib/invitationHelpers.js'
+import { ensureWorkspaceSettings } from '../services/seedSettings.js'
+import { logActivity } from '../services/audit.service.js'
+import { resolveActor } from '../lib/auditActor.js'
+import { ENTITY_TYPES, AUDIT_ACTIONS } from '../config/auditConstants.js'
 
 function workspaceToClient(ws) {
   if (!ws) return null
@@ -79,6 +84,8 @@ export async function createWorkspace(req, res) {
 
     user.currentWorkspaceId = workspaceId
     await user.save()
+
+    await ensureWorkspaceSettings(workspaceId)
 
     const ws = await Workspace.findOne({ workspaceId })
     return res.status(201).json({ ok: true, workspace: workspaceToClient(ws) })
@@ -156,6 +163,21 @@ export async function addMember(req, res) {
     })
     await ws.save()
 
+    const actor = await resolveActor(req)
+    await logActivity({
+      workspaceId,
+      projectId: null,
+      entityType: ENTITY_TYPES.TEAM,
+      entityId: String(targetUser.userId),
+      action: AUDIT_ACTIONS.ADD_MEMBER,
+      performedBy: actor?._id,
+      description: `${actor?.name ?? 'Someone'} added ${targetUser.name ?? targetUser.email} to the team (${clientRole})`,
+      metadata: {
+        role: toDbRole(clientRole),
+        assignedProjectIds: body.assignedProjectIds ?? [],
+      },
+    })
+
     const wsFresh = await Workspace.findOne({ workspaceId })
     const sub = wsFresh ? findMemberSubdoc(wsFresh, targetUser) : null
     return res.status(201).json(memberSubdocToApi(sub, targetUser))
@@ -179,6 +201,11 @@ export async function updateMember(req, res) {
     const sub = findMemberSubdoc(ws, targetUser)
     if (!sub) return res.status(404).json({ error: 'Member not found' })
 
+    const before = {
+      role: sub.role,
+      assignedProjectIds: [...(sub.assignedProjectIds ?? [])],
+    }
+
     if (updates.name !== undefined) sub.name = updates.name
     if (updates.email !== undefined) sub.email = updates.email
     if (updates.phone !== undefined) sub.phone = updates.phone
@@ -188,6 +215,28 @@ export async function updateMember(req, res) {
 
     await ws.save()
     const fresh = findMemberSubdoc(ws, targetUser)
+
+    const actor = await resolveActor(req)
+    const roleChanged = before.role !== fresh.role
+    const projectsChanged =
+      JSON.stringify([...(before.assignedProjectIds ?? [])].sort()) !==
+      JSON.stringify([...(fresh.assignedProjectIds ?? [])].sort())
+    let desc = `${actor?.name ?? 'Someone'} updated ${targetUser.name ?? 'member'}`
+    if (roleChanged) desc += `: role ${before.role} → ${fresh.role}`
+    else if (projectsChanged) desc += ': project assignments updated'
+    else desc += ' (profile updated)'
+
+    await logActivity({
+      workspaceId,
+      projectId: null,
+      entityType: ENTITY_TYPES.TEAM,
+      entityId: String(targetUser.userId),
+      action: AUDIT_ACTIONS.UPDATE_MEMBER,
+      performedBy: actor?._id,
+      description: desc,
+      metadata: { before, after: { role: fresh.role, assignedProjectIds: fresh.assignedProjectIds ?? [] } },
+    })
+
     return res.json(memberSubdocToApi(fresh, targetUser))
   } catch (e) {
     console.error(e)
@@ -205,6 +254,19 @@ export async function removeMember(req, res) {
       { workspaceId },
       { $pull: { members: { user: targetUser._id } } }
     )
+
+    const actor = await resolveActor(req)
+    await logActivity({
+      workspaceId,
+      projectId: null,
+      entityType: ENTITY_TYPES.TEAM,
+      entityId: String(targetUser.userId),
+      action: AUDIT_ACTIONS.REMOVE_MEMBER,
+      performedBy: actor?._id,
+      description: `${actor?.name ?? 'Someone'} removed ${targetUser.name ?? targetUser.email} from the team`,
+      metadata: { removedUserId: targetUser.userId },
+    })
+
     return res.status(204).send()
   } catch (e) {
     console.error(e)
@@ -240,6 +302,19 @@ export async function replaceAllProjects(req, res) {
           .map((p) => ({ workspaceId, projectId: p.id, payload: p }))
       )
     }
+
+    const actor = await resolveActor(req)
+    await logActivity({
+      workspaceId,
+      projectId: null,
+      entityType: ENTITY_TYPES.PROJECT,
+      entityId: workspaceId,
+      action: AUDIT_ACTIONS.BULK_REPLACE,
+      performedBy: actor?._id,
+      description: `${actor?.name ?? 'User'} replaced all projects (${list.length} total)`,
+      metadata: { count: list.length },
+    })
+
     return res.json({ ok: true })
   } catch (e) {
     console.error(e)
@@ -259,6 +334,19 @@ export async function createProject(req, res) {
       { workspaceId, projectId: p.id, payload: p },
       { upsert: true }
     )
+
+    const actor = await resolveActor(req)
+    await logActivity({
+      workspaceId,
+      projectId: p.id,
+      entityType: ENTITY_TYPES.PROJECT,
+      entityId: p.id,
+      action: AUDIT_ACTIONS.CREATE,
+      performedBy: actor?._id,
+      description: `Project '${p.name ?? p.id}' created`,
+      metadata: { name: p.name, projectType: p.projectType },
+    })
+
     return res.status(201).json(p)
   } catch (e) {
     console.error(e)
@@ -272,9 +360,23 @@ export async function updateProject(req, res) {
     const patch = req.body ?? {}
     const row = await Project.findOne({ workspaceId, projectId })
     if (!row) return res.status(404).json({ error: 'Project not found' })
+    const beforePayload = { ...row.payload }
     const merged = { ...row.payload, ...patch, id: row.payload.id ?? projectId }
     row.payload = merged
     await row.save()
+
+    const actor = await resolveActor(req)
+    await logActivity({
+      workspaceId,
+      projectId,
+      entityType: ENTITY_TYPES.PROJECT,
+      entityId: projectId,
+      action: AUDIT_ACTIONS.UPDATE,
+      performedBy: actor?._id,
+      description: `Project '${merged.name ?? projectId}' updated`,
+      metadata: { before: beforePayload, after: merged },
+    })
+
     return res.json(merged)
   } catch (e) {
     console.error(e)
@@ -285,10 +387,115 @@ export async function updateProject(req, res) {
 export async function deleteProject(req, res) {
   try {
     const { workspaceId, projectId } = req.params
+    const row = await Project.findOne({ workspaceId, projectId }).lean()
+    const name = row?.payload?.name ?? projectId
     await Project.deleteOne({ workspaceId, projectId })
+
+    const actor = await resolveActor(req)
+    await logActivity({
+      workspaceId,
+      projectId,
+      entityType: ENTITY_TYPES.PROJECT,
+      entityId: projectId,
+      action: AUDIT_ACTIONS.DELETE,
+      performedBy: actor?._id,
+      description: `Project '${name}' deleted`,
+      metadata: { name },
+    })
+
     return res.status(204).send()
   } catch (e) {
     console.error(e)
     return res.status(500).json({ error: 'Failed to delete project' })
+  }
+}
+
+function actorCanInviteTeam(actorRole) {
+  return ['super_admin', 'admin', 'manager'].includes(actorRole)
+}
+
+export async function listInvitations(req, res) {
+  try {
+    const actor = req.workspaceMember
+    if (!actor || !actorCanInviteTeam(actor.role)) {
+      return res.status(403).json({ error: 'Not allowed to view invitations' })
+    }
+    const { workspaceId } = req.params
+    const ws = await Workspace.findOne({ workspaceId })
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' })
+    const list = (ws.invitations ?? []).map((i) => ({
+      id: String(i._id),
+      email: i.email,
+      role: i.role,
+      status: i.status,
+      createdAt: i.createdAt,
+    }))
+    return res.json(list)
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to list invitations' })
+  }
+}
+
+export async function createInvitation(req, res) {
+  try {
+    const actor = req.workspaceMember
+    if (!actor || !actorCanInviteTeam(actor.role)) {
+      return res.status(403).json({ error: 'Not allowed to invite' })
+    }
+    const { workspaceId } = req.params
+    const email = String(req.body?.email ?? '').trim().toLowerCase()
+    const clientRole = req.body?.role ?? 'member'
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Valid email required' })
+    }
+
+    const ws = await Workspace.findOne({ workspaceId })
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' })
+
+    const invEnum = clientInviteRoleToEnum(clientRole)
+
+    const dup = (ws.invitations ?? []).some((i) => i.email === email && i.status === 'PENDING')
+    if (dup) return res.status(409).json({ error: 'Invitation already pending for this email' })
+
+    const targetUser = await User.findOne({ email })
+    if (targetUser && findMemberSubdoc(ws, targetUser)) {
+      return res.status(409).json({ error: 'User is already a member' })
+    }
+
+    const inviter = await getUserDocByUserId(req.userId)
+    if (!inviter) return res.status(401).json({ error: 'Unauthorized' })
+
+    ws.invitations.push({
+      email,
+      role: invEnum,
+      status: 'PENDING',
+      invitedBy: inviter._id,
+      createdAt: new Date(),
+    })
+    await ws.save()
+    const inv = ws.invitations[ws.invitations.length - 1]
+
+    await logActivity({
+      workspaceId,
+      projectId: null,
+      entityType: ENTITY_TYPES.INVITATION,
+      entityId: String(inv._id),
+      action: AUDIT_ACTIONS.INVITE_SENT,
+      performedBy: inviter._id,
+      description: `${inviter.name ?? 'Someone'} invited ${email} (${inv.role})`,
+      metadata: { email, role: inv.role },
+    })
+
+    return res.status(201).json({
+      id: String(inv._id),
+      email: inv.email,
+      role: inv.role,
+      status: inv.status,
+      createdAt: inv.createdAt,
+    })
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to create invitation' })
   }
 }

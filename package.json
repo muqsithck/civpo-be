@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js",
-    "migrate:roles": "node scripts/migrateWorkspaceRoles.js"
+    "migrate:roles": "node scripts/migrateWorkspaceRoles.js",
+    "migrate:invitations": "node scripts/migrateInvitations.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

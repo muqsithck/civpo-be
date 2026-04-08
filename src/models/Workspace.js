@@ -16,6 +16,17 @@ const workspaceMemberEmbeddedSchema = new mongoose.Schema(
   { _id: true }
 )
 
+const invitationEmbeddedSchema = new mongoose.Schema(
+  {
+    email: { type: String, required: true, lowercase: true, trim: true },
+    role: { type: String, enum: ['ADMIN', 'MEMBER'], required: true },
+    status: { type: String, enum: ['PENDING', 'ACCEPTED'], default: 'PENDING' },
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    createdAt: { type: Date, default: Date.now },
+  },
+  { _id: true }
+)
+
 const workspaceSchema = new mongoose.Schema(
   {
     workspaceId: { type: String, required: true, unique: true, index: true },
@@ -29,10 +40,12 @@ const workspaceSchema = new mongoose.Schema(
     ownerUserId: { type: String },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     members: { type: [workspaceMemberEmbeddedSchema], default: [] },
+    invitations: { type: [invitationEmbeddedSchema], default: [] },
   },
   { timestamps: true }
 )
 
 workspaceSchema.index({ 'members.user': 1 })
+workspaceSchema.index({ 'invitations.email': 1 })
 
 export const Workspace = mongoose.model('Workspace', workspaceSchema)

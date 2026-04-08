@@ -11,6 +11,7 @@ import { WorkspaceMaterialLedgerData } from '../models/WorkspaceMaterialLedgerDa
 import { PlanningDocument } from '../models/PlanningDocument.js'
 import { getDefaultPermissions } from '../lib/roleDefaults.js'
 import { DB_ROLES } from '../lib/workspaceMembership.js'
+import { ensureWorkspaceSettings } from '../services/seedSettings.js'
 import {
   buildLabourDeployments,
   buildPlanningPrototype,
@@ -41,7 +42,6 @@ export async function seedDatabase() {
     email: 'admin@demo.com',
     name: 'Demo Admin',
     passwordHash,
-    invitedMembers: [],
     roleOverride: null,
     currentWorkspaceId: '1',
   })
@@ -51,7 +51,6 @@ export async function seedDatabase() {
     email: 'engineer@demo.com',
     name: 'Site Engineer',
     passwordHash,
-    invitedMembers: [],
     roleOverride: null,
     currentWorkspaceId: '1',
   })
@@ -61,7 +60,6 @@ export async function seedDatabase() {
     email: 'superadmin@demo.com',
     name: 'Super Admin',
     passwordHash,
-    invitedMembers: [],
     roleOverride: null,
     currentWorkspaceId: '1',
   })
@@ -143,6 +141,10 @@ export async function seedDatabase() {
       },
     ],
   })
+
+  for (const wid of ['1', '2', '3']) {
+    await ensureWorkspaceSettings(wid)
+  }
 
   for (const p of MOCK_PROJECTS_W1) {
     await Project.create({

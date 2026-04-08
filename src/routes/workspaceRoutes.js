@@ -3,11 +3,21 @@ import { authMiddleware } from '../middleware/auth.js'
 import { requireWorkspaceMember } from '../middleware/workspaceAccess.js'
 import * as workspaceController from '../controllers/workspaceController.js'
 import * as dataController from '../controllers/dataController.js'
+import * as historyController from '../controllers/history.controller.js'
+import settingsRoutes from './settings.routes.js'
 
 const router = Router({ mergeParams: true })
 
 router.use(authMiddleware)
 router.use(requireWorkspaceMember)
+
+/** Workspace audit log (also registered on app.js — keep in sync). */
+router.get('/history', historyController.listHistory)
+
+router.use('/settings', settingsRoutes)
+
+router.get('/invitations', workspaceController.listInvitations)
+router.post('/invitations', workspaceController.createInvitation)
 
 router.get('/members', workspaceController.listMembers)
 router.post('/members', workspaceController.addMember)

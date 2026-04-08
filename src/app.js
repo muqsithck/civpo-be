@@ -7,7 +7,9 @@ import { seedDatabase } from './config/seed.js'
 import authRoutes from './routes/authRoutes.js'
 import workspaceRoutes from './routes/workspaceRoutes.js'
 import * as workspaceController from './controllers/workspaceController.js'
+import * as historyController from './controllers/history.controller.js'
 import { authMiddleware } from './middleware/auth.js'
+import { requireWorkspaceMember } from './middleware/workspaceAccess.js'
 
 if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = 'dev-insecure-jwt-secret-min-32-characters-long'
@@ -39,6 +41,13 @@ function createApp() {
   app.use('/api/auth', authRoutes)
   app.post('/api/workspaces', authMiddleware, workspaceController.createWorkspace)
   app.post('/api/workspaces/join', authMiddleware, workspaceController.joinWorkspace)
+  /** Audit log (registered before workspace router to guarantee GET matches). */
+  app.get(
+    '/api/workspaces/:workspaceId/history',
+    authMiddleware,
+    requireWorkspaceMember,
+    historyController.listHistory
+  )
   app.use('/api/workspaces/:workspaceId', workspaceRoutes)
 
   app.use((err, _req, res, _next) => {

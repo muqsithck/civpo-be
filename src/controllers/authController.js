@@ -8,6 +8,7 @@ import {
   getWorkspaceRoleForUser,
   findMemberSubdoc,
 } from '../lib/workspaceMembership.js'
+import { inviteEnumToMemberDbRole, defaultPermissionsForInviteMember } from '../lib/invitationHelpers.js'
 
 const RESERVED_EMAILS = ['admin@demo.com', 'engineer@demo.com', 'superadmin@demo.com']
 
@@ -139,7 +140,6 @@ export async function me(req, res) {
         name: user.name,
       },
       workspace,
-      invitedMembers: user.invitedMembers ?? [],
       role,
       roleOverride: user.roleOverride ?? null,
       workspaces,
@@ -157,11 +157,8 @@ export async function patchMe(req, res) {
       return res.status(401).json({ error: 'User not found' })
     }
 
-    const { invitedMembers, roleOverride, currentWorkspaceId } = req.body ?? {}
+    const { roleOverride, currentWorkspaceId } = req.body ?? {}
 
-    if (invitedMembers !== undefined) {
-      user.invitedMembers = Array.isArray(invitedMembers) ? invitedMembers : []
-    }
     if (roleOverride !== undefined) {
       user.roleOverride = roleOverride
     }
@@ -197,7 +194,6 @@ export async function patchMe(req, res) {
         name: user.name,
       },
       workspace,
-      invitedMembers: user.invitedMembers ?? [],
       role,
       roleOverride: user.roleOverride ?? null,
       workspaces,
@@ -205,5 +201,79 @@ export async function patchMe(req, res) {
   } catch (e) {
     console.error(e)
     return res.status(500).json({ error: 'Failed to update session' })
+  }
+}
+
+export async function listMyInvitations(req, res) {
+  try {
+    const user = await User.findOne({ userId: req.userId })
+    if (!user) return res.status(401).json({ error: 'User not found' })
+    const email = user.email.toLowerCase()
+    const workspaces = await Workspace.find({
+      invitations: { $elemMatch: { email, status: 'PENDING' } },
+    }).lean()
+
+    const out = []
+    for (const ws of workspaces) {
+      for (const inv of ws.invitations ?? []) {
+        if (inv.email === email && inv.status === 'PENDING') {
+          out.push({
+            invitationId: String(inv._id),
+            workspaceId: ws.workspaceId,
+            workspaceName: ws.name,
+            role: inv.role,
+            createdAt: inv.createdAt,
+          })
+        }
+      }
+    }
+    return res.json(out)
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to list invitations' })
+  }
+}
+
+export async function acceptInvitation(req, res) {
+  try {
+    const user = await User.findOne({ userId: req.userId })
+    if (!user) return res.status(401).json({ error: 'User not found' })
+    const workspaceId = String(req.body?.workspaceId ?? '').trim()
+    if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' })
+
+    const ws = await Workspace.findOne({ workspaceId })
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' })
+
+    const email = user.email.toLowerCase()
+    const inv = ws.invitations?.find((i) => i.email === email && i.status === 'PENDING')
+    if (!inv) return res.status(404).json({ error: 'No pending invitation for this workspace' })
+
+    if (findMemberSubdoc(ws, user)) {
+      inv.status = 'ACCEPTED'
+      user.currentWorkspaceId = workspaceId
+      await Promise.all([ws.save(), user.save()])
+      return res.json({ ok: true, workspaceId, alreadyMember: true })
+    }
+
+    const dbRole = inviteEnumToMemberDbRole(inv.role)
+    const perms = defaultPermissionsForInviteMember(inv.role)
+
+    ws.members.push({
+      user: user._id,
+      role: dbRole,
+      status: 'ACTIVE',
+      name: user.name,
+      email: user.email,
+      permissions: perms,
+      assignedProjectIds: [],
+    })
+    inv.status = 'ACCEPTED'
+    user.currentWorkspaceId = workspaceId
+    await Promise.all([ws.save(), user.save()])
+
+    return res.json({ ok: true, workspaceId })
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to accept invitation' })
   }
 }
